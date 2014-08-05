@@ -155,6 +155,13 @@ EXPORT_SYMBOL(switch_dev);
 #define MSM_FB_PRIM_BUF_SIZE	(roundup((800 * 480 * 4), 4096) * 2) /* 4bpp * 2 Pages */
 #endif
 
+#ifdef CONFIG_FB_MSM_OVERLAY0_WRITEBACK
+/* width x height x 3 bpp x 2 frame buffer */
+#define MSM_FB_OVERLAY0_WRITEBACK_SIZE roundup((800 * 480 * 3 * 2), 4096)
+#else
+#define MSM_FB_OVERLAY0_WRITEBACK_SIZE 0
+#endif
+
 #define MSM_FB_SIZE roundup(MSM_FB_PRIM_BUF_SIZE, 4096)
 
 #define MSM_PMEM_ADSP_SIZE		0x1400000
@@ -166,10 +173,11 @@ EXPORT_SYMBOL(switch_dev);
 static struct platform_device ion_dev;
 #define MSM_ION_AUDIO_SIZE	MSM_PMEM_AUDIO_SIZE
 #define MSM_ION_SF_SIZE		MSM_PMEM_SF_SIZE
+#define MSM_ION_WB_SIZE		MSM_FB_OVERLAY0_WRITEBACK_SIZE
 #ifdef CONFIG_MSM_ADSP_USE_PMEM
 #define MSM_ION_VIDC_SIZE	0x1C80000
 #endif
-#define MSM_ION_HEAP_NUM	4
+#define MSM_ION_HEAP_NUM	5
 #endif
 
 #define PMIC_GPIO_INT		27
@@ -4669,11 +4677,7 @@ static struct msm_panel_common_pdata mdp_pdata = {
 	.gpio = 30,
 	.mdp_max_clk = 192000000,
 	.mdp_rev = MDP_REV_40,
-#ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
-        .mem_hid = BIT(ION_CP_MM_HEAP_ID),
-#else
-        .mem_hid = MEMTYPE_EBI0,
-#endif
+	.mem_hid = BIT(ION_CP_WB_HEAP_ID),
 };
 
 static struct msm_gpio lcd_panel_on_gpios[] = {
@@ -7444,6 +7448,14 @@ struct ion_platform_heap msm7x30_heaps[] = {
 			.memory_type = ION_EBI_TYPE,
 			.extra_data = (void *)&co_ion_pdata,
 		},
+		/* WB */
+		{
+			.id	= ION_CP_WB_HEAP_ID,
+			.type   = ION_HEAP_TYPE_CARVEOUT,
+			.name   = ION_WB_HEAP_NAME,
+			.memory_type = ION_EBI_TYPE,
+			.extra_data = (void *)&co_ion_pdata,
+		},
 #endif
 };
 
@@ -7515,12 +7527,18 @@ static void __init reserve_pmem_memory(void)
 #endif
 }
 
+static void __init reserve_mdp_memory(void)
+{
+	mdp_pdata.ov0_wb_size = MSM_FB_OVERLAY0_WRITEBACK_SIZE;
+}
+
 static void __init size_ion_devices(void)
 {
 #ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
 	ion_pdata.heaps[1].size = msm_ion_camera_size;
 	ion_pdata.heaps[2].size = MSM_ION_AUDIO_SIZE;
 	ion_pdata.heaps[3].size = MSM_ION_SF_SIZE;
+	ion_pdata.heaps[4].size = MSM_ION_WB_SIZE;
 #endif
 }
 
@@ -7530,7 +7548,7 @@ static void __init reserve_ion_memory(void)
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += msm_ion_camera_size;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_AUDIO_SIZE;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_SF_SIZE;
-	msm7x30_reserve_table[MEMTYPE_EBI0].size += 1;
+	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_WB_SIZE;
 #endif
 }
 
@@ -7539,6 +7557,7 @@ static void __init msm7x30_calculate_reserve_sizes(void)
 	fix_sizes();
 	size_pmem_devices();
 	reserve_pmem_memory();
+	reserve_mdp_memory();
 	size_ion_devices();
 	reserve_ion_memory();
 }
