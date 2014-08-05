@@ -40,7 +40,6 @@
 #include <linux/leds-pmic8058.h>
 #include <linux/input/cy8c_ts.h>
 #include <linux/msm_adc.h>
-#include <linux/dma-contiguous.h>
 #include <linux/dma-mapping.h>
 #include <linux/regulator/consumer.h>
 
@@ -164,18 +163,9 @@ EXPORT_SYMBOL(switch_dev);
 static struct platform_device ion_dev;
 #define MSM_ION_AUDIO_SIZE	MSM_PMEM_AUDIO_SIZE
 #define MSM_ION_SF_SIZE		MSM_PMEM_SF_SIZE
+#ifdef CONFIG_MSM_ADSP_USE_PMEM
 #define MSM_ION_MM_SIZE		0x1C80000
-
-#define MSM_ION_MM_HEAP_BASE	0x0
-#define MSM_ION_MM_HEAP_LIMIT	0x20000000
-#ifdef CONFIG_CMA
-#define MSM_ION_MM_HEAP_TYPE	ION_HEAP_TYPE_DMA
-#define MSM_ION_MM_SIZE_CARVING	0x0
-#else
-#define MSM_ION_MM_HEAP_TYPE	ION_HEAP_TYPE_CARVEOUT
-#define MSM_ION_MM_SIZE_CARVING	MSM_ION_MM_SIZE
 #endif
-
 #define MSM_ION_HEAP_NUM	4
 #endif
 
@@ -7175,22 +7165,6 @@ static struct ion_co_heap_pdata co_ion_pdata = {
 	.adjacent_mem_id = INVALID_HEAP_ID,
 	.align = PAGE_SIZE,
 };
-
-static struct ion_co_heap_pdata co_mm_ion_pdata = {
-	.adjacent_mem_id = INVALID_HEAP_ID,
-	.align = PAGE_SIZE,
-};
-
-static u64 msm_dmamask = DMA_BIT_MASK(32);
-
-static struct platform_device ion_mm_heap_device = {
-	.name = "ion-mm-heap-device",
-	.id = -1,
-	.dev = {
-		.dma_mask = &msm_dmamask,
-		.coherent_dma_mask = DMA_BIT_MASK(32),
-	}
-};
 #endif
 
 /**
@@ -7204,14 +7178,13 @@ struct ion_platform_heap msm7x30_heaps[] = {
 			.name	= ION_VMALLOC_HEAP_NAME,
 		},
 #ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
-		/* MM */
+		/* PMEM_ADSP = CAMERA */
 		{
 			.id	= ION_CP_MM_HEAP_ID,
-			.type	= MSM_ION_MM_HEAP_TYPE,
+			.type	= ION_HEAP_TYPE_CARVEOUT,
 			.name	= ION_MM_HEAP_NAME,
 			.memory_type = ION_EBI_TYPE,
-			.extra_data = (void *)&co_mm_ion_pdata,
-			.priv	= (void *)&ion_mm_heap_device.dev,
+			.extra_data = (void *)&co_ion_pdata,
 		},
 		/* PMEM_AUDIO */
 		{
@@ -7311,7 +7284,7 @@ static void __init size_ion_devices(void)
 static void __init reserve_ion_memory(void)
 {
 #if defined(CONFIG_ION_MSM) && defined(CONFIG_MSM_MULTIMEDIA_USE_ION)
-	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_MM_SIZE_CARVING;
+	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_MM_SIZE;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_AUDIO_SIZE;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_SF_SIZE;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += 1;
@@ -7346,13 +7319,6 @@ static void __init msm7x30_reserve(void)
 {
 	reserve_info = &msm7x30_reserve_info;
 	msm_reserve();
-#ifdef CONFIG_CMA
-	dma_declare_contiguous(
-			&ion_mm_heap_device.dev,
-			MSM_ION_MM_SIZE,
-			MSM_ION_MM_HEAP_BASE,
-			MSM_ION_MM_HEAP_LIMIT);
-#endif
 #ifdef CONFIG_ANDROID_PERSISTENT_RAM
 	add_persistent_ram();
 #endif
