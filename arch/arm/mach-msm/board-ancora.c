@@ -40,6 +40,7 @@
 #include <linux/leds-pmic8058.h>
 #include <linux/input/cy8c_ts.h>
 #include <linux/msm_adc.h>
+#include <linux/dma-contiguous.h>
 #include <linux/dma-mapping.h>
 #include <linux/regulator/consumer.h>
 
@@ -155,6 +156,13 @@ EXPORT_SYMBOL(switch_dev);
 #define MSM_FB_PRIM_BUF_SIZE	(roundup((800 * 480 * 4), 4096) * 2) /* 4bpp * 2 Pages */
 #endif
 
+#ifdef CONFIG_FB_MSM_OVERLAY0_WRITEBACK
+/* width x height x 3 bpp x 2 frame buffer */
+#define MSM_FB_OVERLAY0_WRITEBACK_SIZE roundup((800 * 480 * 3 * 2), 4096)
+#else
+#define MSM_FB_OVERLAY0_WRITEBACK_SIZE 0
+#endif
+
 #define MSM_FB_SIZE roundup(MSM_FB_PRIM_BUF_SIZE, 4096)
 
 #define MSM_PMEM_ADSP_SIZE		0x1A00000
@@ -166,10 +174,23 @@ EXPORT_SYMBOL(switch_dev);
 static struct platform_device ion_dev;
 #define MSM_ION_AUDIO_SIZE	MSM_PMEM_AUDIO_SIZE
 #define MSM_ION_SF_SIZE		MSM_PMEM_SF_SIZE
-#ifdef CONFIG_MSM_ADSP_USE_PMEM
 #define MSM_ION_VIDC_SIZE	0x1C80000
+#define MSM_ION_WB_SIZE         MSM_FB_OVERLAY0_WRITEBACK_SIZE
+#define MSM_ION_HEAP_NUM	5
 #endif
-#define MSM_ION_HEAP_NUM	4
+
+#define CAMERA_HEAP_BASE             0x0
+#define CAMERA_HEAP_LIMIT            0x20000000
+#ifdef CONFIG_CMA
+#define CAMERA_HEAP_TYPE             ION_HEAP_TYPE_DMA
+#define msm_ion_camera_size_carving  0x0
+#else
+#define CAMERA_HEAP_TYPE             ION_HEAP_TYPE_CARVEOUT
+#endif
+
+#ifdef CONFIG_PMEM_ADSP_USE_CMA
+#define PMEM_ADSP_HEAP_BASE          0x0
+#define PMEM_ADSP_HEAP_LIMIT         0x20000000
 #endif
 
 #define PMIC_GPIO_INT		27
@@ -4298,11 +4319,26 @@ static struct platform_device msm_migrate_pages_device = {
 	.id     = -1,
 };
 
+#ifdef CONFIG_PMEM_ADSP_USE_CMA
+static struct platform_device pmem_adsp_heap_device = {
+	.name = "pmem-adsp-heap-device",
+	.id = -1,
+	.dev = {
+	        .dma_mask = &msm_dmamask,
+	        .coherent_dma_mask = DMA_BIT_MASK(32),
+	}
+};
+#endif
+
 static struct android_pmem_platform_data android_pmem_adsp_pdata = {
 	.name = "pmem_adsp",
 	.allocator_type = PMEM_ALLOCATORTYPE_BITMAP,
 	.cached = 0,
 	.memory_type = MEMTYPE_EBI0,
+#ifdef CONFIG_PMEM_ADSP_USE_CMA
+	.use_cma = 1,
+	.private_data = &pmem_adsp_heap_device.dev,
+#endif
 };
 
 static struct platform_device android_pmem_adsp_device = {
@@ -4587,11 +4623,7 @@ static struct msm_panel_common_pdata mdp_pdata = {
 	.gpio = 30,
 	.mdp_max_clk = 192000000,
 	.mdp_rev = MDP_REV_40,
-#ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
-        .mem_hid = BIT(ION_CP_MM_HEAP_ID),
-#else
-        .mem_hid = MEMTYPE_EBI0,
-#endif
+	.mem_hid = BIT(ION_CP_WB_HEAP_ID),
 };
 
 static struct msm_gpio lcd_panel_on_gpios[] = {
@@ -7322,6 +7354,22 @@ static struct ion_co_heap_pdata co_ion_pdata = {
 	.adjacent_mem_id = INVALID_HEAP_ID,
 	.align = PAGE_SIZE,
 };
+
+static struct ion_co_heap_pdata co_mm_ion_pdata = {
+       .adjacent_mem_id = INVALID_HEAP_ID,
+       .align = PAGE_SIZE,
+};
+
+static u64 msm_dmamask = DMA_BIT_MASK(32);
+
+static struct platform_device ion_cma_device = {
+       .name = "ion-cma-device",
+       .id = -1,
+       .dev = {
+               .dma_mask = &msm_dmamask,
+               .coherent_dma_mask = DMA_BIT_MASK(32),
+       }
+};
 #endif
 
 /**
@@ -7338,10 +7386,11 @@ struct ion_platform_heap msm7x30_heaps[] = {
 		/* PMEM_ADSP = CAMERA */
 		{
 			.id	= ION_CAMERA_HEAP_ID,
-			.type	= ION_HEAP_TYPE_CARVEOUT,
+			.type	= CAMERA_HEAP_TYPE,
 			.name	= ION_CAMERA_HEAP_NAME,
 			.memory_type = ION_EBI_TYPE,
-			.extra_data = (void *)&co_ion_pdata,
+			.extra_data = (void *)&co_mm_ion_pdata,
+                        .priv = (void *)&ion_cma_device.dev,
 		},
 		/* PMEM_AUDIO */
 		{
@@ -7359,11 +7408,20 @@ struct ion_platform_heap msm7x30_heaps[] = {
 			.memory_type = ION_EBI_TYPE,
 			.extra_data = (void *)&co_ion_pdata,
 		},
+                /* WB */
+                {
+                        .id     = ION_CP_WB_HEAP_ID,
+                        .type   = ION_HEAP_TYPE_CARVEOUT,
+                        .name   = ION_WB_HEAP_NAME,
+                        .memory_type = ION_EBI_TYPE,
+                        .extra_data = (void *)&co_ion_pdata,
+                },
 #endif
 };
 
 static struct ion_platform_data ion_pdata = {
 	.nr = MSM_ION_HEAP_NUM,
+        .has_outer_cache = 1,
 	.heaps = msm7x30_heaps,
 };
 
@@ -7430,22 +7488,28 @@ static void __init reserve_pmem_memory(void)
 #endif
 }
 
+static void __init reserve_mdp_memory(void)
+{
+        mdp_pdata.ov0_wb_size = MSM_FB_OVERLAY0_WRITEBACK_SIZE;
+}
+
 static void __init size_ion_devices(void)
 {
 #ifdef CONFIG_MSM_MULTIMEDIA_USE_ION
 	ion_pdata.heaps[1].size = msm_ion_camera_size;
 	ion_pdata.heaps[2].size = MSM_ION_AUDIO_SIZE;
 	ion_pdata.heaps[3].size = MSM_ION_SF_SIZE;
+        ion_pdata.heaps[4].size = MSM_ION_WB_SIZE;
 #endif
 }
 
 static void __init reserve_ion_memory(void)
 {
 #if defined(CONFIG_ION_MSM) && defined(CONFIG_MSM_MULTIMEDIA_USE_ION)
-	msm7x30_reserve_table[MEMTYPE_EBI0].size += msm_ion_camera_size;
+	msm7x30_reserve_table[MEMTYPE_EBI0].size += msm_ion_camera_size_carving;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_AUDIO_SIZE;
 	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_SF_SIZE;
-	msm7x30_reserve_table[MEMTYPE_EBI0].size += 1;
+	msm7x30_reserve_table[MEMTYPE_EBI0].size += MSM_ION_WB_SIZE;
 #endif
 }
 
@@ -7454,6 +7518,7 @@ static void __init msm7x30_calculate_reserve_sizes(void)
 	fix_sizes();
 	size_pmem_devices();
 	reserve_pmem_memory();
+	reserve_mdp_memory();
 	size_ion_devices();
 	reserve_ion_memory();
 }
@@ -7477,6 +7542,20 @@ static void __init msm7x30_reserve(void)
 {
 	reserve_info = &msm7x30_reserve_info;
 	msm_reserve();
+#ifdef CONFIG_CMA
+       dma_declare_contiguous(
+                       &ion_cma_device.dev,
+                       msm_ion_camera_size,
+                       CAMERA_HEAP_BASE,
+                       CAMERA_HEAP_LIMIT);
+#endif
+#ifdef CONFIG_PMEM_ADSP_USE_CMA
+       dma_declare_contiguous(
+	               &pmem_adsp_heap_device.dev,
+                       MSM_PMEM_ADSP_SIZE,
+                       PMEM_ADSP_HEAP_BASE,
+                       PMEM_ADSP_HEAP_LIMIT);
+#endif
 #ifdef CONFIG_ANDROID_PERSISTENT_RAM
 	add_persistent_ram();
 #endif
